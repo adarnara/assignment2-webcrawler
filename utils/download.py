@@ -6,12 +6,9 @@ from utils.response import Response
 
 def download(url, config, logger=None):
     host, port = config.cache_server
-    # Timeout so workers don't block forever if cache server is slow/unreachable
-    timeout = getattr(config, 'download_timeout', 60)
     resp = requests.get(
         f"http://{host}:{port}/",
-        params=[("q", f"{url}"), ("u", f"{config.user_agent}")],
-        timeout=timeout)
+        params=[("q", f"{url}"), ("u", f"{config.user_agent}")])
     try:
         if resp and resp.content:
             return Response(cbor.loads(resp.content))

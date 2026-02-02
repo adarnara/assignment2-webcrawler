@@ -36,23 +36,23 @@ class Worker(Thread):
             except:
                 domain = None
             
-            # Check shared last download time and compute wait; sleep OUTSIDE lock so
-            # other workers can still get URLs; then reserve slot under lock
-            wait_time = 0.0
+            # Politeness: wait until 500ms since last download for this domain, then reserve
+            # (reserve only inside lock so no race; sleep outside lock so others can get URLs)
             if domain:
-                with self.frontier.lock:
-                    if domain in self.frontier.last_download_time:
-                        time_since_last = time.time() - self.frontier.last_download_time[domain]
-                        if time_since_last < self.config.time_delay:
-                            wait_time = self.config.time_delay - time_since_last
-                if wait_time > 0:
-                    self.logger.info(
-                        f"Worker-{self.worker_id} blocked: politeness delay for {domain} "
-                        f"(waiting {wait_time:.3f}s)")
-                    time.sleep(wait_time)
-                with self.frontier.lock:
-                    # Reserve slot so another worker cannot pass the check before we start
-                    self.frontier.last_download_time[domain] = time.time()
+                while True:
+                    with self.frontier.lock:
+                        now = time.time()
+                        last = self.frontier.last_download_time.get(domain, 0.0)
+                        time_since_last = (now - last) if last else 999.0
+                        wait_time = max(0.0, self.config.time_delay - time_since_last)
+                        if wait_time <= 0:
+                            self.frontier.last_download_time[domain] = time.time()
+                            break
+                    if wait_time > 0:
+                        self.logger.info(
+                            f"Worker-{self.worker_id} blocked: politeness delay for {domain} "
+                            f"(waiting {wait_time:.3f}s)")
+                        time.sleep(wait_time)
             
             self.logger.info(f"Worker-{self.worker_id} fetching: {tbd_url}")
             resp = download(tbd_url, self.config, self.logger)
