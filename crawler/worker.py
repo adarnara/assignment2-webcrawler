@@ -26,14 +26,15 @@ class Worker(Thread):
         '''
         while True:
             tbd_url = self.frontier.get_tbd_url()
-            # if not tbd_url:
-            #     self.logger.info("Frontier is empty. Stopping Crawler.")
-            #     break
-
             if not tbd_url:
+                self.frontier.notify_idle()
+                if self.frontier.shutdown_event.is_set():
+                    self.logger.info("Frontier empty and all workers idle; stopping.")
+                    break
                 time.sleep(0.1)
                 continue
-            
+
+            self.frontier.notify_busy()
             # Extract domain for politeness checking
             try:
                 domain = urlparse(tbd_url).netloc.lower()

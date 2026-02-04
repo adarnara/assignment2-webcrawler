@@ -2,7 +2,7 @@ import os
 import shelve
 import heapq
 import time
-from threading import Thread, RLock
+from threading import Thread, RLock, Event
 from queue import Queue, Empty
 from urllib.parse import urlparse
 from collections import deque
@@ -35,7 +35,10 @@ class Frontier(object):
         
         # Thread safety
         self.lock = RLock()
-        
+        # Shutdown when frontier empty and all workers idle (stops infinite spin)
+        self.shutdown_event = Event()
+        self.idle_count = 0
+
         # Track last DOWNLOAD completion time per domain (for true politeness at server level)
         self.last_download_time = {}
         
@@ -61,6 +64,28 @@ class Frontier(object):
                     self.add_url(url)
         
         self.logger.info(f"Initialized Mercator frontier with {self.num_back_queues} back queues")
+
+    def _has_pending_work(self):
+        """True if frontier has URLs to process. Caller must hold self.lock."""
+        return bool(
+            self.front_queue or self.ready_heap
+            or any(self.back_queues)
+        )
+
+    def notify_idle(self):
+        """Worker got None from get_tbd_url(). If all workers idle and frontier empty, signal shutdown."""
+        with self.lock:
+            self.idle_count += 1
+            if (
+                self.idle_count >= self.config.threads_count
+                and not self._has_pending_work()
+            ):
+                self.shutdown_event.set()
+
+    def notify_busy(self):
+        """Worker got a URL; reset idle count."""
+        with self.lock:
+            self.idle_count = 0
 
     def _parse_save_file(self):
         ''' Load incomplete URLs from save file into front queue '''
@@ -92,8 +117,10 @@ class Frontier(object):
     def _assign_url_to_back_queue(self, url):
         ''' 
         Assign a URL to appropriate back queue based on its host.
-        Creates new back queue assignment if needed.
+        Only valid hosts (per is_valid) get back queues; invalid URLs are never assigned.
         '''
+        if not is_valid(url):
+            return False
         host = self._extract_host(url)
         if not host:
             return False
@@ -187,19 +214,25 @@ class Frontier(object):
             return url
 
     def _refill_back_queues(self):
-        ''' Try to move URLs from front queue to available back queues '''
+        ''' Try to move URLs from front queue to available back queues. Only valid URLs get back queues. '''
         while self.front_queue:
             url = self.front_queue[0]  # Peek at front
+            if not is_valid(url):
+                self.front_queue.popleft()  # Drop invalid URL so we never assign a back queue to it
+                continue
             if self._assign_url_to_back_queue(url):
                 self.front_queue.popleft()  # Successfully assigned, remove
             else:
-                break  # Can't assign, stop trying
+                break  # Can't assign (e.g. no free queue), stop trying
 
     def _try_assign_from_front_queue(self):
-        ''' Try to assign one URL from front queue to a back queue '''
+        ''' Try to assign one URL from front queue to a back queue. Skips invalid URLs. '''
         if not self.front_queue:
             return False
         url = self.front_queue[0]
+        if not is_valid(url):
+            self.front_queue.popleft()  # Drop invalid so back queues stay valid-host only
+            return True  # Consumed one entry, caller may retry
         if self._assign_url_to_back_queue(url):
             self.front_queue.popleft()
             return True
@@ -217,8 +250,10 @@ class Frontier(object):
         
         while self.front_queue:
             url = self.front_queue.popleft()
-            if self._extract_host(url) == host:
+            if self._extract_host(url) == host and is_valid(url):
                 urls_for_host.append(url)
+            elif self._extract_host(url) == host:
+                pass  # Same host but invalid URL, drop it
             else:
                 remaining_urls.append(url)
         
@@ -251,11 +286,12 @@ class Frontier(object):
         if old_host:
             self.logger.info(f"Released back queue {queue_id} from host {old_host}")
         
-        # Try to assign this queue to a new host from front queue
-        if self.front_queue:
+        # Try to assign this queue to a new host from front queue (only valid URLs)
+        while self.front_queue:
             url = self.front_queue.popleft()
+            if not is_valid(url):
+                continue  # Drop invalid URL, try next
             host = self._extract_host(url)
-            
             if host and host not in self.host_to_queue:
                 # Assign queue to new host
                 self.host_to_queue[host] = queue_id
@@ -264,23 +300,24 @@ class Frontier(object):
                 # Add to heap (ready immediately)
                 heapq.heappush(self.ready_heap, (time.time(), queue_id))
                 self.logger.info(f"Reassigned back queue {queue_id} to new host {host}")
-            else:
-                # No reassignment: URL's host already has a back queue (or invalid host).
-                # Put URL back; this queue becomes available for the next new host.
-                self.front_queue.appendleft(url)
-                self.queue_in_use[queue_id] = False
-                self.logger.info(
-                    f"Released back queue {queue_id} not reassigned (front URL host already has queue or invalid); "
-                    f"queue now available, front_queue size={len(self.front_queue)}")
-        else:
-            # No URLs in front queue to assign; queue is freed, no reassignment
+                return
+            # URL's host already has a back queue; put URL back and free this queue
+            self.front_queue.appendleft(url)
             self.queue_in_use[queue_id] = False
             self.logger.info(
-                f"Released back queue {queue_id} not reassigned (front queue empty); queue now available")
+                f"Released back queue {queue_id} not reassigned (front URL host already has queue); "
+                f"queue now available, front_queue size={len(self.front_queue)}")
+            return
+        # No URLs in front queue (or none valid); queue is freed
+        self.queue_in_use[queue_id] = False
+        self.logger.info(
+            f"Released back queue {queue_id} not reassigned (front queue empty or no valid URL); queue now available")
 
     def add_url(self, url):
-        ''' Add URL to frontier (goes to front queue initially) '''
+        ''' Add URL to frontier (goes to front queue initially). Only valid URLs are added. '''
         url = normalize(url)
+        if not is_valid(url):
+            return
         urlhash = get_urlhash(url)
         
         with self.lock:
