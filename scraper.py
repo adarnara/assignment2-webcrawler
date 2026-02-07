@@ -105,11 +105,8 @@ def extract_next_links(url, resp):
                 if parent is not None:
                     parent.remove(element)
         except Exception:
-            # If cleanup fails, still try to extract what we can.
             pass
 
-        # Some pages contain invalid byte sequences that can trigger
-        # UnicodeDecodeError inside lxml during XPath string extraction.
         try:
             return ' '.join(tree.xpath('//body//text()') or tree.xpath('//text()'))
         except UnicodeDecodeError:
@@ -134,7 +131,7 @@ def extract_next_links(url, resp):
         return hashlib.md5(normalized.encode()).hexdigest()
     
     def is_trap(url):
-        """Detect crawler traps with robust pattern detection (COMBINED BEST FROM ALL VERSIONS)."""
+        """Detect crawler traps with robust pattern detection."""
         parsed = urlparse(url)
         path = parsed.path.lower()
         query = parsed.query.lower()
@@ -157,45 +154,42 @@ def extract_next_links(url, resp):
             if any(count >= 3 for count in segment_counts.values()):
                 return True
         
-        # 4. Date patterns (COMPREHENSIVE - includes monthly archives from V1)
+        # 4. Date patterns
         date_patterns = [
-            r'\d{4}-\d{2}-\d{2}',  # 2023-04-15 (daily)
-            r'\d{4}/\d{2}/\d{2}',  # 2023/04/15 (daily)
-            r'\d{8}',              # 20230415 (daily)
-            r'/\d{4}/\d{2}(/|$)',  # /2019/10/ or /2019/10 (monthly archives) - FROM V1!
-            r'day/\d',             # day/15
-            r'month/\d',           # month/04
-            r'year/\d',            # year/2023
+            r'\d{4}-\d{2}-\d{2}',
+            r'\d{4}/\d{2}/\d{2}',
+            r'\d{8}',
+            r'/\d{4}/\d{2}(/|$)',
+            r'day/\d',
+            r'month/\d',
+            r'year/\d',
         ]
         for pattern in date_patterns:
             if re.search(pattern, url):
                 return True
         
-        # 5. Calendar/date parameters (EXPANDED from V1 & V2)
+        # 5. Calendar/date parameters
         date_params = [
             'year=', 'month=', 'day=', 'date=', 
-            'ical=', 'outlook-ical=',               # From V3
-            'tribe-bar-date', 'eventdisplay',       # From V2
-            'calendar',                             # From V2 (as query param)
+            'ical=', 'outlook-ical=',
+            'tribe-bar-date', 'eventdisplay',
+            'calendar',
         ]
         if any(param in query for param in date_params):
             return True
         
         # 6. Calendar keywords in path
-        calendar_keywords = ['/calendar', '/events/', '/agenda', '\.ics']
         if any(kw in path for kw in ['/calendar', '/agenda', '.ics']):
             return True
-        
-        # Special case: /events/ with dates is a trap, but /event/ (singular) is usually OK
         if '/events/' in path and re.search(r'\d{4}', url):
             return True
         
-        # 7. Pagination traps (with smart limits)
+        # 7. Pagination traps
         pagination_patterns = [
-            (r'page=(\d+)', 50),      # page=51+
-            (r'offset=(\d+)', 500),   # offset=501+
-            (r'start=(\d+)', 500),    # start=501+
-            (r'/page/(\d+)', 50),     # /page/51+
+            (r'page=(\d+)', 50),
+            (r'offset=(\d+)', 500),
+            (r'start=(\d+)', 500),
+            (r'/page/(\d+)', 50),
         ]
         for pattern, max_val in pagination_patterns:
             match = re.search(pattern, url)
@@ -207,41 +201,39 @@ def extract_next_links(url, resp):
         if any(param in query for param in trap_params):
             return True
         
-        # 9. Action URLs (forms, authentication, etc.)
+        # 9. Action URLs
         action_patterns = ['action=', 'login', 'logout', 'signin', 'signout', 'register', 
                           'signup', 'subscribe', 'unsubscribe', 'replytocom=', 'download=']
         if any(pattern in url.lower() for pattern in action_patterns):
             return True
         
-        # 10. Sorting/filtering parameters (creates duplicate content)
+        # 10. Sorting/filtering parameters
         filter_params = ['sort=', 'order=', 'filter=', 'view=', 'tab_']
         if sum(1 for param in filter_params if param in query) >= 2:
             return True
         
-        # 10a. Apache directory listing sorting (uses semicolons)
+        # 10a. Apache directory listing sorting
         if re.search(r'\?C=[NMSD];O=[AD]', url):
             return True
         
-        # 10b. Wiki/media browser - EXPANDED FROM V1 (more comprehensive)
+        # 10b. Wiki/media browser
         wiki_params = ['do=media', 'do=diff', 'do=revisions', 'do=index', 'do=login', 'rev=']
         if ('wiki.ics.uci.edu' in netloc or 'swiki.ics.uci.edu' in netloc) and 'doku.php' in path:
-            # Block all wiki action/revision parameters that create infinite variations
             if any(param in query for param in wiki_params):
                 return True
-            # Block tab_ parameters (UI state variations)
             if 'tab_' in query:
                 return True
         
-        # 10c. Filter[] parameters (FROM V1) - block combinatorial filter explosions
+        # 10c. Filter[] parameters
         if 'filter[' in query or 'filter%5B' in query:
             return True
         
-        # 11. Print/share/export versions (duplicate content)
+        # 11. Print/share/export versions
         duplicate_params = ['print=', 'share=', 'export=', 'pdf=', 'format=']
         if any(param in query for param in duplicate_params):
             return True
         
-        # 12. WordPress/CMS low-value paths (FROM V2)
+        # 12. WordPress/CMS low-value paths
         wordpress_paths = ['/category/', '/author/', '/tag/', '/feed/']
         if any(wp_path in path for wp_path in wordpress_paths):
             return True
@@ -281,6 +273,21 @@ def extract_next_links(url, resp):
     # Main logic
     links = []
     
+    # Handle redirects (3xx) - follow the Location header like the other crawler
+    if resp.status and 300 <= resp.status < 400:
+        if resp.raw_response and hasattr(resp.raw_response, 'headers'):
+            location = resp.raw_response.headers.get('Location')
+            if location:
+                redirect_url = urljoin(url, location)
+                clean_redirect, _ = urldefrag(redirect_url)
+                return [clean_redirect]
+        return links
+    
+    # Handle status 200 with no data (dead URLs)
+    if resp.status == 200 and (resp.raw_response is None or not resp.raw_response.content):
+        return links
+    
+    # Skip non-200 status codes
     if resp.status != 200:
         if 600 <= resp.status <= 699:
             print(f"Cache error {resp.status} for {url}: {resp.error}")
@@ -301,8 +308,7 @@ def extract_next_links(url, resp):
         if len(content) > 10 * 1024 * 1024:
             return links
         
-        # Decode bytes safely before feeding to lxml to avoid UnicodeDecodeError
-        # during XPath text extraction on malformed encodings.
+        # Decode bytes safely before feeding to lxml
         decoded_html = None
         if isinstance(content, bytes):
             encoding = None
@@ -372,7 +378,7 @@ def is_valid(url):
     # There are already some conditions that return False.
     
     def is_trap(url):
-        """Detect crawler traps with robust pattern detection (COMBINED BEST FROM ALL VERSIONS)."""
+        """Detect crawler traps with robust pattern detection."""
         parsed = urlparse(url)
         path = parsed.path.lower()
         query = parsed.query.lower()
@@ -395,45 +401,42 @@ def is_valid(url):
             if any(count >= 3 for count in segment_counts.values()):
                 return True
         
-        # 4. Date patterns (COMPREHENSIVE - includes monthly archives from V1)
+        # 4. Date patterns
         date_patterns = [
-            r'\d{4}-\d{2}-\d{2}',  # 2023-04-15 (daily)
-            r'\d{4}/\d{2}/\d{2}',  # 2023/04/15 (daily)
-            r'\d{8}',              # 20230415 (daily)
-            r'/\d{4}/\d{2}(/|$)',  # /2019/10/ or /2019/10 (monthly archives) - FROM V1!
-            r'day/\d',             # day/15
-            r'month/\d',           # month/04
-            r'year/\d',            # year/2023
+            r'\d{4}-\d{2}-\d{2}',
+            r'\d{4}/\d{2}/\d{2}',
+            r'\d{8}',
+            r'/\d{4}/\d{2}(/|$)',
+            r'day/\d',
+            r'month/\d',
+            r'year/\d',
         ]
         for pattern in date_patterns:
             if re.search(pattern, url):
                 return True
         
-        # 5. Calendar/date parameters (EXPANDED from V1 & V2)
+        # 5. Calendar/date parameters
         date_params = [
             'year=', 'month=', 'day=', 'date=', 
-            'ical=', 'outlook-ical=',               # From V3
-            'tribe-bar-date', 'eventdisplay',       # From V2
-            'calendar',                             # From V2 (as query param)
+            'ical=', 'outlook-ical=',
+            'tribe-bar-date', 'eventdisplay',
+            'calendar',
         ]
         if any(param in query for param in date_params):
             return True
         
         # 6. Calendar keywords in path
-        calendar_keywords = ['/calendar', '/events/', '/agenda', '\.ics']
         if any(kw in path for kw in ['/calendar', '/agenda', '.ics']):
             return True
-        
-        # Special case: /events/ with dates is a trap, but /event/ (singular) is usually OK
         if '/events/' in path and re.search(r'\d{4}', url):
             return True
         
-        # 7. Pagination traps (with smart limits)
+        # 7. Pagination traps
         pagination_patterns = [
-            (r'page=(\d+)', 50),      # page=51+
-            (r'offset=(\d+)', 500),   # offset=501+
-            (r'start=(\d+)', 500),    # start=501+
-            (r'/page/(\d+)', 50),     # /page/51+
+            (r'page=(\d+)', 50),
+            (r'offset=(\d+)', 500),
+            (r'start=(\d+)', 500),
+            (r'/page/(\d+)', 50),
         ]
         for pattern, max_val in pagination_patterns:
             match = re.search(pattern, url)
@@ -445,41 +448,39 @@ def is_valid(url):
         if any(param in query for param in trap_params):
             return True
         
-        # 9. Action URLs (forms, authentication, etc.)
+        # 9. Action URLs
         action_patterns = ['action=', 'login', 'logout', 'signin', 'signout', 'register', 
                           'signup', 'subscribe', 'unsubscribe', 'replytocom=', 'download=']
         if any(pattern in url.lower() for pattern in action_patterns):
             return True
         
-        # 10. Sorting/filtering parameters (creates duplicate content)
+        # 10. Sorting/filtering parameters
         filter_params = ['sort=', 'order=', 'filter=', 'view=', 'tab_']
         if sum(1 for param in filter_params if param in query) >= 2:
             return True
         
-        # 10a. Apache directory listing sorting (uses semicolons)
+        # 10a. Apache directory listing sorting
         if re.search(r'\?C=[NMSD];O=[AD]', url):
             return True
         
-        # 10b. Wiki/media browser - EXPANDED FROM V1 (more comprehensive)
+        # 10b. Wiki/media browser
         wiki_params = ['do=media', 'do=diff', 'do=revisions', 'do=index', 'do=login', 'rev=']
         if ('wiki.ics.uci.edu' in netloc or 'swiki.ics.uci.edu' in netloc) and 'doku.php' in path:
-            # Block all wiki action/revision parameters that create infinite variations
             if any(param in query for param in wiki_params):
                 return True
-            # Block tab_ parameters (UI state variations)
             if 'tab_' in query:
                 return True
         
-        # 10c. Filter[] parameters (FROM V1) - block combinatorial filter explosions
+        # 10c. Filter[] parameters
         if 'filter[' in query or 'filter%5B' in query:
             return True
         
-        # 11. Print/share/export versions (duplicate content)
+        # 11. Print/share/export versions
         duplicate_params = ['print=', 'share=', 'export=', 'pdf=', 'format=']
         if any(param in query for param in duplicate_params):
             return True
         
-        # 12. WordPress/CMS low-value paths (FROM V2)
+        # 12. WordPress/CMS low-value paths
         wordpress_paths = ['/category/', '/author/', '/tag/', '/feed/']
         if any(wp_path in path for wp_path in wordpress_paths):
             return True
@@ -491,38 +492,50 @@ def is_valid(url):
         if parsed.scheme not in set(["http", "https"]):
             return False
         
+        # Domain check using same approach as the other crawler:
+        # Join last 3 labels of the domain and check against allowed set
         hostname = parsed.netloc.lower()
         path = parsed.path.lower()
+        dotlist = hostname.split(".")
         
-        allowed = False
-        if hostname == 'ics.uci.edu' or hostname.endswith('.ics.uci.edu'):
-            allowed = True
-        elif hostname == 'cs.uci.edu' or hostname.endswith('.cs.uci.edu'):
-            allowed = True
-        elif hostname == 'informatics.uci.edu' or hostname.endswith('.informatics.uci.edu'):
-            allowed = True
-        elif hostname == 'stat.uci.edu' or hostname.endswith('.stat.uci.edu'):
-            allowed = True
-        elif hostname == 'today.uci.edu' and path.startswith('/department/information_computer_sciences'):
-            allowed = True
+        # Check against the allowed domains (matches any subdomain of these)
+        allowed_domains = {
+            ".ics.uci.edu",
+            ".cs.uci.edu",
+            ".informatics.uci.edu",
+            ".stat.uci.edu",
+            "ics.uci.edu",
+            "cs.uci.edu",
+            "informatics.uci.edu",
+            "stat.uci.edu",
+        }
         
-        if not allowed:
+        is_allowed = ".".join(dotlist[-3:]) in allowed_domains
+        
+        # Also allow today.uci.edu under the specific ICS path (per assignment spec)
+        if not is_allowed:
+            if hostname == 'today.uci.edu' and path.startswith('/department/information_computer_sciences'):
+                is_allowed = True
+        
+        if not is_allowed:
             return False
         
+        # Trap detection
         if is_trap(url):
             return False
         
+        # File extension check
         return not re.match(
             r".*\.(css|js|bmp|gif|jpe?g|ico"
             + r"|png|tiff?|mid|mp2|mp3|mp4"
-            + r"|wav|avi|mov|mpeg|ram|m4v|mkv|ogg|ogv|pdf"
+            + r"|wav|avi|mov|mpeg|ram|m4v|mkv|ogg|ogv|pdf|war"
             + r"|ps|eps|tex|ppt|pptx|doc|docx|xls|xlsx|names"
             + r"|data|dat|exe|bz2|tar|msi|bin|7z|psd|dmg|iso"
             + r"|epub|dll|cnf|tgz|sha1"
             + r"|thmx|mso|arff|rtf|jar|csv"
             + r"|rm|smil|wmv|swf|wma|zip|rar|gz"
             + r"|sql|db|sqlite|json|xml|rss|atom"
-            + r"|apk|deb|rpm|img|war|ear"
+            + r"|apk|deb|rpm|img|ear"
             + r"|bak|tmp|log|cfg|conf|ini"
             + r"|ppsx|odt|ods|odp|odg|odf"
             + r"|svg|webp|woff|woff2|eot|ttf|otf)$", path)
