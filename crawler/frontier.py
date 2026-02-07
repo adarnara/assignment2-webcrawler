@@ -50,14 +50,22 @@ class Frontier(object):
         self.last_request_time = {}
 
         # ---- Persistence ----
-        if not os.path.exists(self.config.save_file) and not restart:
+        save_exists = any(
+            os.path.exists(self.config.save_file + ext)
+            for ext in ['', '.bak', '.dat', '.dir', '.db']
+        )
+        if not save_exists and not restart:
             self.logger.info(
                 f"Did not find save file {self.config.save_file}, "
                 f"starting from seed.")
-        elif os.path.exists(self.config.save_file) and restart:
+        elif save_exists and restart:
             self.logger.info(
                 f"Found save file {self.config.save_file}, deleting it.")
-            os.remove(self.config.save_file)
+            # Shelve on Windows creates .bak, .dat, .dir files — delete all
+            for ext in ['', '.bak', '.dat', '.dir', '.db']:
+                path = self.config.save_file + ext
+                if os.path.exists(path):
+                    os.remove(path)
 
         self.save = shelve.open(self.config.save_file)
 

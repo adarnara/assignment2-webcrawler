@@ -6,6 +6,8 @@ import os
 import json
 import hashlib
 
+ANALYTICS_FILE = 'crawler_analytics.json'
+
 def scraper(url, resp):
     links = extract_next_links(url, resp)
     return [link for link in links if is_valid(link)]
@@ -54,9 +56,9 @@ def extract_next_links(url, resp):
             'ics_subdomains': defaultdict(set),
             'content_hashes': set()
         }
-        if os.path.exists('crawler_analytics.json'):
+        if os.path.exists(ANALYTICS_FILE):
             try:
-                with open('crawler_analytics.json', 'r') as f:
+                with open(ANALYTICS_FILE, 'r') as f:
                     data = json.load(f)
                     analytics['unique_pages'] = set(data.get('unique_pages', []))
                     analytics['longest_page'] = tuple(data.get('longest_page', ['', 0]))
@@ -79,7 +81,7 @@ def extract_next_links(url, resp):
                 'ics_subdomains': {k: list(v) for k, v in analytics['ics_subdomains'].items()},
                 'content_hashes': list(analytics['content_hashes'])
             }
-            with open('crawler_analytics.json', 'w') as f:
+            with open(ANALYTICS_FILE, 'w') as f:
                 json.dump(data, f, indent=2)
         except Exception:
             pass
